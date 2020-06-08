@@ -526,7 +526,7 @@ bool RTPSParticipantImpl::createWriter(
 
     // Get persistence service
     IPersistenceService* persistence = nullptr;
-    if (param.endpoint.durabilityKind >= TRANSIENT)
+    if (param.endpoint.durabilityKind >= TRANSIENT_LOCAL)
     {
         persistence = get_persistence_service(param.endpoint);
         if (persistence == nullptr)
@@ -675,7 +675,7 @@ bool RTPSParticipantImpl::createReader(
 
     // Get persistence service
     IPersistenceService* persistence = nullptr;
-    if (param.endpoint.durabilityKind >= TRANSIENT)
+    if (param.endpoint.durabilityKind >= TRANSIENT_LOCAL)
     {
         persistence = get_persistence_service(param.endpoint);
         if (persistence == nullptr)
