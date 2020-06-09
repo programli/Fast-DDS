@@ -966,11 +966,18 @@ private:
             , segment_name_(segment_name)
         {
             lock_file_name_ = segment_name + "_el";
+            update_alive_time(std::chrono::steady_clock::now());
         }
 
         std::shared_ptr<SharedMemSegment> segment()
         {
             return segment_;
+        }
+
+        void update_alive_time(
+                const std::chrono::steady_clock::time_point& time)
+        {
+            last_alive_check_time_.store(time.time_since_epoch().count());
         }
 
         /**
@@ -1008,12 +1015,16 @@ private:
         private:
 
             std::unordered_map<std::shared_ptr<SegmentWrapper>, uint32_t> watched_segments_;
+            std::unordered_map<std::shared_ptr<SegmentWrapper>, uint32_t>::iterator watched_it_;
 
             std::mutex to_add_remove_mutex_;
             std::vector<std::shared_ptr<SegmentWrapper> > to_add_;
             std::vector<std::shared_ptr<SegmentWrapper> > to_remove_;
 
+            static constexpr uint32_t MAX_CHECKS_PER_RUN {10};
+
             WatchTask()
+                : watched_it_(watched_segments_.end())
             {
                 SharedMemWatchdog::get().add_task(this);
             }
@@ -1061,22 +1072,44 @@ private:
                 to_remove_.clear();
             }
 
+            /**
+             * Each time is called checks a maximum of MAX_CHECKS_PER_RUN segments.
+             */
             void run()
             {
-                update_watched_segments();
+                uint32_t segments_checked = 0;
+                auto now = std::chrono::steady_clock::now();
 
-                // Watch every segment
-                auto segment_it =  watched_segments_.begin();
-                while (segment_it != watched_segments_.end())
+                // We checked all the segments in the last run
+                if (watched_it_ == watched_segments_.end())
                 {
-                    if (!(*segment_it).first->check_alive())
+                    // Add / remove segments if it was requested
+                    update_watched_segments();
+                    watched_it_ = watched_segments_.begin();
+                }
+
+                // Iterate through the watched_segments until end or MAX_CHECKS_PER_RUN achieve
+                while (watched_it_ != watched_segments_.end() && segments_checked < MAX_CHECKS_PER_RUN)
+                {
+                    auto& segment = (*watched_it_).first;
+                    // If the segment has been inactive for much time...
+                    if (segment->alive_check_timeout(now))
                     {
-                        segment_it = watched_segments_.erase(segment_it);
+                        if (!(*watched_it_).first->check_alive())
+                        {
+                            watched_it_ = watched_segments_.erase(watched_it_);
+                        }
+                        else
+                        {
+                            watched_it_++;
+                        }
                     }
                     else
                     {
-                        segment_it++;
+                        watched_it_++;
                     }
+
+                    segments_checked++;
                 }
             }
 
@@ -1089,6 +1122,9 @@ private:
         SharedMemSegment::Id segment_id_;
         std::string segment_name_;
         std::string lock_file_name_;
+        std::atomic<std::chrono::steady_clock::time_point::rep> last_alive_check_time_;
+
+        static constexpr uint32_t ALIVE_CHECK_TIMEOUT_SECS {5};
 
         bool check_alive()
         {
@@ -1100,7 +1136,19 @@ private:
                 return false;
             }
 
+            update_alive_time(std::chrono::steady_clock::now());
+
             return true;
+        }
+
+        bool alive_check_timeout(
+                const std::chrono::steady_clock::time_point& now) const
+        {
+            std::chrono::steady_clock::time_point last_check_time(
+                std::chrono::nanoseconds(last_alive_check_time_.load()));
+
+            return std::chrono::duration_cast<std::chrono::seconds>(now - last_check_time).count()
+                   >= ALIVE_CHECK_TIMEOUT_SECS;
         }
 
         void close_and_remove()
@@ -1136,6 +1184,7 @@ private:
         if (segment_it != ids_segments_.end())
         {
             segment = (*segment_it).second->segment();
+            (*segment_it).second->update_alive_time(std::chrono::steady_clock::now());
         }
         else // Is a new segment
         {
